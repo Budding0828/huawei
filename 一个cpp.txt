@@ -1,0 +1,1181 @@
+
+// OEMACS.cpp: 定义控制台应用程序的入口点。
+//
+
+#include "stdafx.h"
+#include <iostream>
+#include <vector>
+#include <algorithm>
+#include <random>
+#include <chrono>
+#include <cmath>
+#include <time.h>
+#include <fstream>
+#include <string>
+using namespace std;
+
+#define MaxIter 50				//最大迭代次数
+#define m 5						//蚂蚁数目
+//相关系数
+#define Beta 2.0
+#define Epsilon 0.1
+#define q0 0.7
+#define prho 0.1
+#define N 150
+double t0;
+
+int VMRank[N + 5];
+int VMRankSg[N + 5];
+int VMRankSb[N + 5];
+struct link
+{
+	int num;
+	int cnt;
+}linksize[N + 5];
+
+
+int vc[N + 5];
+int vm[N + 5];
+
+int PC[N + 5];
+int PM[N + 5];
+
+//Solution
+struct Solu_Struct
+{
+	vector<int> vmlist;
+	int LC;
+	int LM;
+};
+
+Solu_Struct Solution[N + 5];
+Solu_Struct Solution_Global[N + 5];
+Solu_Struct Solution_best[N + 5];
+
+
+double ansOfFit_2 = DBL_MAX;
+
+struct VM_Struct
+{
+	vector<int> serverlist;
+};
+VM_Struct I[N + 5];
+
+double t[N + 5][N + 5];			//pheromone value indicate the preference of two VMs
+double T[N + 5][N + 5];		//the preference value of VM(j) to be assigned to server i
+
+double n[N + 5][N + 5];		//the heuristic information is associated to each VM assignment for
+												//measuring the utilization improvement that VM(j) can bring to server i 
+
+double p[N + 5][N + 5];		//probability for assigning an unassigned VMj to server i
+double r[N + 5][N + 5];		//for overloade
+
+												//the usage of CPU and memory of server i before joining VM(j)
+int UC[N + 5];
+int UM[N + 5];
+
+double over[N + 5];
+
+int Mmin;				//最小服务器数量
+int Mt;					//当前服务器数量
+
+int k;					//ant k
+int iter;
+
+
+int _PC = 0;
+int _PM = 0;
+string needToFouce;
+int startdate = 0;
+int enddate = 0;
+int sizenumber = 0;		//flavor 规格
+int totVMNumber = 0;
+
+int find_flavor(string s)
+{
+	int t = 0;
+	int i = s.size() - 1;
+	t = s[i] - '0';
+	i--;
+	if (s[i] <= '9' && s[i] >= '0')
+	{
+		t = t + (s[i] - '0') * 10;
+	}
+	return t;
+}
+
+int find_date(string s)
+{
+	int t = 0;
+	t = (s[8] - '0') * 10 + (s[9] - '0');
+	return t;
+}
+
+struct Request
+{
+	int number;
+	int vc;
+	int vm;
+	int prenumber;
+}request_flavor[30];
+
+
+int everyday[5000][25];
+int count_date = 0;
+
+//读取要求文件
+void readRequest()
+{
+	int hard = 0;
+	string s_flavor;
+	string starttime;
+	string endtime;
+	string time;
+
+	const char* input_txt = "C:\\Users\\56989\\Desktop\\in\\input_5flavors_cpu_7days.txt";
+	fstream fin;
+	fin.open(input_txt, ios::in);
+
+
+	fin >> _PC >> _PM >> hard >> sizenumber;
+	_PM = _PM * 1024;
+	for (int i = 1; i <= sizenumber; i++)
+	{
+		fin >> s_flavor >> request_flavor[i].vc >> request_flavor[i].vm;
+		request_flavor[i].number = find_flavor(s_flavor);
+	}
+	fin >> needToFouce;
+	fin >> starttime >> time >> endtime >> time;
+	startdate = find_date(starttime);
+	enddate = find_date(endtime);
+
+	fin.close();
+}
+
+void showRequest()
+{
+	for (int i = 1; i <= sizenumber; i++)
+	{
+		cout << request_flavor[i].number << " " << request_flavor[i].vc << " " << request_flavor[i].vm << endl;
+	}
+	cout << needToFouce << endl;
+	cout << startdate << "  " << enddate << endl;
+
+}
+
+void readTrainData()
+{
+	const char* filepath_in = "C:\\Users\\56989\\Desktop\\in\\TrainData_2015.1.1_2015.2.19.txt";
+	fstream fin;
+	fin.open(filepath_in, ios::in);
+
+	string s_name;
+	string s_flavor;
+	string s_date;
+	string s_time;
+	
+	int date = 0;
+	count_date = 0;
+	while (fin >> s_name)
+	{
+		fin >> s_flavor >> s_date >> s_time;
+		
+		if (find_date(s_date) != date)
+		{//新的一天
+			date = find_date(s_date);
+			count_date++;
+		}
+		everyday[count_date][find_flavor(s_flavor)]++;
+	}
+	
+	fin.close();
+}
+
+void showTrainData()
+{
+	for (int i = 1; i <= count_date; i++)
+	{
+		for (int j = 1; j <= 25; j++)
+		{
+			cout << everyday[i][j] << " ";
+		}
+		cout << endl;
+	}
+}
+
+void FreeData(double **dat, double *d, int count)
+{
+	int i;
+	free(d);
+	for (i = 0; i < count; i++)
+		free(dat[i]);
+	free(dat);
+}
+
+// 解线性方程。data[count*(count+1)]矩阵数组；count：方程元数；
+// Answer[count]：求解数组 。返回：0求解成功，-1无解或者无穷解
+int LinearEquations(double *data, int count, double *Answer)
+{
+	int j, mm, n;
+	double tmp, **dat, *d = data;
+	dat = (double**)malloc(count * sizeof(double*));
+	for (mm = 0; mm < count; mm++, d += (count + 1))
+	{
+		dat[mm] = (double*)malloc((count + 1) * sizeof(double));
+		memcpy(dat[mm], d, (count + 1) * sizeof(double));
+	}
+	d = (double*)malloc((count + 1) * sizeof(double));
+	for (mm = 0; mm < count - 1; mm++)
+	{
+		// 如果主对角线元素为0，行交换
+		for (n = mm + 1; n < count && dat[mm][mm] == 0.0; n++)
+		{
+			if (dat[n][mm] != 0.0)
+			{
+				memcpy(d, dat[mm], (count + 1) * sizeof(double));
+				memcpy(dat[mm], dat[n], (count + 1) * sizeof(double));
+				memcpy(dat[n], d, (count + 1) * sizeof(double));
+			}
+		}
+		// 行交换后，主对角线元素仍然为0，无解，返回-1
+		if (dat[mm][mm] == 0.0)
+		{
+			//FreeData(dat, d, count);
+			return -1;
+		}
+		// 消元
+		for (n = mm + 1; n < count; n++)
+		{
+			tmp = dat[n][mm] / dat[mm][mm];
+			for (j = mm; j <= count; j++)
+				dat[n][j] -= tmp * dat[mm][j];
+		}
+	}
+	for (j = 0; j < count; j++)
+		d[j] = 0.0;
+	// 求得count - 1的元
+	Answer[count - 1] = dat[count - 1][count] / dat[count - 1][count - 1];
+	// 逐行代入求各元
+	for (mm = count - 2; mm >= 0; mm--)
+	{
+		for (j = count - 1; j > mm; j--)
+			d[mm] += Answer[j] * dat[mm][j];
+		Answer[mm] = (dat[mm][count] - d[mm]) / dat[mm][mm];
+	}
+	//FreeData(dat, d, count);
+	return 0;
+}
+
+// 求多元回归方程：Y = B0 + B1X1 + B2X2 + ...BnXn
+// data[rows*cols]二维数组；X1i,X2i,...Xni,Yi (i=0 to rows-1)
+// rows：数据行数；cols数据列数；Answer[cols]：返回回归系数数组(B0,B1...Bn)
+// SquarePoor[4]：返回方差分析指标: 回归平方和，剩余平方和，回归平方差，剩余平方差
+// 返回值：0求解成功，-1错误
+int MultipleRegression(double *data, int rows, int cols, double *Answer, double *SquarePoor)
+{
+	int mm, n, i, count = cols - 1;
+	double *dat, *p, a, b;
+	if (data == 0 || Answer == 0 || rows < 2 || cols < 2)
+		return -1;
+	dat = (double*)malloc(cols * (cols + 1) * sizeof(double));
+	dat[0] = (double)rows;
+	for (n = 0; n < count; n++)                     // n = 0 to cols - 2
+	{
+		a = b = 0.0;
+		for (p = data + n, mm = 0; mm < rows; mm++, p += cols)
+		{
+			a += *p;
+			b += (*p * *p);
+		}
+		dat[n + 1] = a;                              // dat[0, n+1] = Sum(Xn)
+		dat[(n + 1) * (cols + 1)] = a;               // dat[n+1, 0] = Sum(Xn)
+		dat[(n + 1) * (cols + 1) + n + 1] = b;       // dat[n+1,n+1] = Sum(Xn * Xn)
+		for (i = n + 1; i < count; i++)             // i = n+1 to cols - 2
+		{
+			for (a = 0.0, p = data, mm = 0; mm < rows; mm++, p += cols)
+				a += (p[n] * p[i]);
+			dat[(n + 1) * (cols + 1) + i + 1] = a;   // dat[n+1, i+1] = Sum(Xn * Xi)
+			dat[(i + 1) * (cols + 1) + n + 1] = a;   // dat[i+1, n+1] = Sum(Xn * Xi)
+		}
+	}
+	for (b = 0.0, mm = 0, p = data + n; mm < rows; mm++, p += cols)
+		b += *p;
+	dat[cols] = b;                                   // dat[0, cols] = Sum(Y)
+	for (n = 0; n < count; n++)
+	{
+		for (a = 0.0, p = data, mm = 0; mm < rows; mm++, p += cols)
+			a += (p[n] * p[count]);
+		dat[(n + 1) * (cols + 1) + cols] = a;        // dat[n+1, cols] = Sum(Xn * Y)
+	}
+	n = LinearEquations(dat, cols, Answer);          // 计算方程式
+													 // 方差分析
+	if (n == 0 && SquarePoor)
+	{
+		b = b / rows;                                // b = Y的平均值
+		SquarePoor[0] = SquarePoor[1] = 0.0;
+		p = data;
+		for (mm = 0; mm < rows; mm++, p++)
+		{
+			for (i = 1, a = Answer[0]; i < cols; i++, p++)
+				a += (*p * Answer[i]);               // a = Ym的估计值
+			SquarePoor[0] += ((a - b) * (a - b));    // U(回归平方和)
+			SquarePoor[1] += ((*p - a) * (*p - a));  // Q(剩余平方和)(*p = Ym)
+		}
+		SquarePoor[2] = SquarePoor[0] / count;       // 回归方差
+		if (rows - cols > 0.0)
+			SquarePoor[3] = SquarePoor[1] / (rows - cols); // 剩余方差
+		else
+			SquarePoor[3] = 0.0;
+	}
+	free(dat);
+	return n;
+}
+
+void Display(double *dat, double *Answer, double *SquarePoor, int rows, int cols)
+{
+	double v, *p;
+	int i, j;
+	printf("回归方程式:    \nY = %.5lf", Answer[0]);
+	for (i = 1; i < cols; i++)
+		printf(" + %.5lf*X%d", Answer[i], i);
+	printf(" \n");
+	printf("回归显著性检验: \n");
+	printf("回归平方和：%12.4lf  回归方差：%12.4lf \n", SquarePoor[0], SquarePoor[2]);
+	printf("剩余平方和：%12.4lf  剩余方差：%12.4lf \n", SquarePoor[1], SquarePoor[3]);
+	printf("离差平方和：%12.4lf  标准误差：%12.4lf \n", SquarePoor[0] + SquarePoor[1], sqrt(SquarePoor[3]));
+	printf("F   检  验：%12.4lf  相关系数：%12.4lf \n", SquarePoor[2] / SquarePoor[3],
+		sqrt(SquarePoor[0] / (SquarePoor[0] + SquarePoor[1])));
+	printf("剩余分析: \n");
+	printf("      观察值      估计值      剩余值    剩余平方 \n");
+	for (i = 0, p = dat; i < rows; i++, p++)
+	{
+		v = Answer[0];
+		for (j = 1; j < cols; j++, p++)
+			v += *p * Answer[j];
+		printf("%12.2lf%12.2lf%12.2lf%12.2lf \n", *p, v, *p - v, (*p - v) * (*p - v));
+	}
+	printf("\n");
+	
+}
+
+void showfinal()
+{
+	const char* showfinal = "C:\\Users\\56989\\Desktop\\out\\answer.txt";
+	fstream fout;
+	fout.open(showfinal, ios::out);
+
+	//输出预测
+	fout << totVMNumber << endl;
+	for (int i = 1; i <= sizenumber; i++)
+	{
+		fout << "flavor" << request_flavor[i].number << " " 
+			<< request_flavor[i].prenumber << endl;
+	}
+
+	fout << endl;
+	
+	fout << Mmin << endl;
+	
+	int cnt = 1;
+	for (int i = 1; i <= N; i++)
+	{
+		if (Solution_Global[i].vmlist.size() == 0)	continue;
+		else
+		{
+			fout << cnt;
+			for (int j = 0; j < Solution_Global[i].vmlist.size(); j++)
+			{
+				fout << " flavor" << linksize[VMRankSg[Solution_Global[i].vmlist[j]]].num << " "
+					<< linksize[VMRankSg[Solution_Global[i].vmlist[j]]].cnt;
+			}
+			fout << endl;
+			cnt++;
+		}
+	}
+		
+	
+
+}
+
+//------------放置部分-------------
+
+
+//初始化数据
+void initvcvm()
+{
+	totVMNumber = 0;
+	for (int i = 1; i <= sizenumber; i++)
+	{
+		for (int j = 1; j <= request_flavor[i].prenumber; j++)
+		{
+			totVMNumber++;
+			
+			linksize[totVMNumber].num = request_flavor[i].number;
+			linksize[totVMNumber].cnt = j;
+
+			PC[totVMNumber] = _PC;
+			PM[totVMNumber] = _PM;
+			vc[totVMNumber] = request_flavor[i].vc;
+			vm[totVMNumber] = request_flavor[i].vm;
+		}
+	}
+	t0 = 1.0 / totVMNumber;
+}
+
+
+//产生low 到 high 之间的整数
+int rand_int(int low, int high)
+{
+	unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+	srand(seed);
+
+	int val = rand() % (high - low) + low;
+	return val;
+}
+
+void ShowSolution() {
+	//cout << "显示Solution_Global" << endl;
+	for (int i = 1; i <= N; i++)
+	{
+		if (Solution_Global[i].vmlist.size() == 0)	continue;
+		cout << "第" << i << "个服务器上的虚拟机编号为：";
+		for (int j = 0; j < Solution_Global[i].vmlist.size(); j++)
+		{
+			cout << VMRankSg[Solution_Global[i].vmlist[j]] << " ";
+		}
+		cout << endl;
+	}
+	cout << "当前server数量： " << Mmin << endl;
+
+}
+
+void init() {
+
+	//init pheromone
+	for (int i = 1; i <= totVMNumber; i++)
+		for (int j = 1; j <= totVMNumber; j++)
+			t[i][j] = t0;
+
+	//set S(gb)
+	//place each VM on one server
+	for (int i = 1; i <= totVMNumber; i++) {
+		//Solution_Global[i][i] = 1;
+		Solution_Global[i].vmlist.push_back(i);
+		Solution_Global[i].LC = PC[i];
+		Solution_Global[i].LM = PM[i];
+
+	}
+
+	//set Mmin t
+	Mmin = totVMNumber;
+	iter = 1;
+
+	for (int i = 1; i <= totVMNumber; i++)
+		VMRankSg[i] = VMRank[i] = i;
+
+
+}
+
+//为每一个VM选择合适的server
+void SelectSet4VM(int j) {
+	int allvc = 0;
+	int allvm = 0;
+
+	I[j].serverlist.clear();
+
+	for (int i = 1; i <= Mt; i++) {
+		if ((UC[i] + vc[j] <= PC[i]) && (UM[i] + vm[j] <= PM[i]))
+		{
+			I[j].serverlist.push_back(i);
+		}
+	}
+}
+
+double Calcu_T(int i, int j) {
+	int num = Solution[i].vmlist.size();
+	if (num == 0)	T[i][j] = t0;
+	else
+	{
+		double all_t = 0.0;
+		for (int k = 0; k < num; k++)
+			all_t += t[Solution[i].vmlist[k]][j];
+
+		T[i][j] = (1.0 / num) * 1.0 * all_t;
+	}
+	//cout << "结束计算Calcu_T" << endl;
+	return T[i][j];
+}
+
+double Calcu_n(int i, int j) {
+	//cout << "开始计算Calcu_n" << endl;
+	double molecular = 1.0 - abs(1.0*(PC[i] - UC[i] - vc[j]) / PC[i] - 1.0*(PM[i] - UM[i] - vm[j]) / PM[i]);
+	double denominator = abs(1.0*(PC[i] - UC[i] - vc[j]) / PC[i]) + abs(1.0*(PM[i] - UM[i] - vm[j]) / PM[i]) + 1.0;
+
+	n[i][j] = molecular / denominator;
+	//cout << "结束计算Calcu_n" << endl;
+	return n[i][j];
+
+}
+
+double Calcu_Probability(int i, int j) {
+
+	double molecular = Calcu_T(i, j) * pow(Calcu_n(i, j), Beta);
+	double denominator = 0.0;
+
+	
+	for (int k = 0; k < I[j].serverlist.size(); k++)
+		denominator += Calcu_T(I[j].serverlist[k], j) * pow(Calcu_n(I[j].serverlist[k], j), Beta);
+
+	p[i][j] = molecular / denominator;
+	return p[i][j];
+}
+
+double Calcu_over(int i, int j) {
+	double temp1 = 0.0;
+	temp1 = (double)abs(PC[i] - UC[i] - vc[j])*1.0 / PC[i];
+	double temp2 = 0.0;
+	temp2 = (double)abs(PM[i] - UM[i] - vm[j])*1.0 / PM[i];
+
+	over[i] = temp1 + temp2;
+	return over[i];
+
+
+}
+
+double Calcu_r(int i, int j) {
+	
+	double molecular = over[i];
+	double denominator = 0.0;
+
+	for (int k = 1; k <= Mt; k++) {
+		denominator += over[k];
+	}
+	r[i][j] = 1.0 - molecular / denominator;
+	return r[i][j];
+}
+
+int CPUUseOfServeri(Solu_Struct* S, int i) {
+	return PC[i] - S[i].LC;
+}
+
+int MemUseOfServeri(Solu_Struct* S, int i)
+{
+	return PM[i] - S[i].LM;
+}
+
+//wheel selection for general case
+int WheelSelection1(int j) {
+	unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+	srand(seed);
+	double q = ((double)rand()) / RAND_MAX;
+	
+	int k;
+	for (k = 0; k < I[j].serverlist.size(); k++)
+	{
+		q -= p[I[j].serverlist[k]][j];
+		if (q <= 0)	return I[j].serverlist[k];
+	}
+	return --k;
+}
+
+//wheel selection for special case
+int WheelSelection2(int j) {
+	unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+	srand(seed);
+	double q = ((double)rand()) / RAND_MAX;
+	for (int k = 1; k <= Mt; k++) {
+		q -= r[k][j];
+		if (q <= 0)	return k;
+	}
+
+	return Mt;
+
+}
+
+//state transition rule
+int StateTransRule(int j) {
+	int index = 0;
+	unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+	srand(seed);
+	double q = ((double)rand()) / RAND_MAX;
+
+	if (q <= q0) {
+
+		double maxx = -1;
+		double temp = 0.0;
+		
+		for (int k = 0; k < I[j].serverlist.size(); k++)
+		{
+			temp = T[I[j].serverlist[k]][j] * pow(n[I[j].serverlist[k]][j], Beta);
+			if (temp > maxx)
+			{
+				maxx = temp;
+				index = I[j].serverlist[k];
+			}
+		}
+	}
+	else
+	{
+		index = WheelSelection1(j);
+	}
+	return index;
+}
+
+//complementary rule
+int ComplementaryRule(int j) {
+	int index = 0;
+	unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+	srand(seed);
+	double q = ((double)rand()) / RAND_MAX;
+
+	for (int k = 1; k <= N; k++)
+	{
+		Calcu_over(k, j);
+	}
+
+	if (q <= q0) {
+		double minn = DBL_MAX;
+		for (int k = 1; k <= Mt; k++) {
+			if (over[k] < minn) {
+				index = k;
+				minn = over[k];
+			}
+		}
+	}
+	else {
+
+		for (int k = 1; k <= N; k++) {
+			Calcu_r(k, j);
+		}
+		index = WheelSelection2(j);
+
+	}
+	return index;
+}
+
+void Construct() {
+	//cout << "进入Construct" << endl;
+	//shuffle VMs randomly
+	unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+	shuffle(vc + 1, vc + 1 + totVMNumber, std::default_random_engine(seed));
+	shuffle(vm + 1, vm + 1 + totVMNumber, std::default_random_engine(seed));
+	shuffle(VMRank + 1, VMRank + 1 + totVMNumber, std::default_random_engine(seed));
+
+	Mt = Mmin - 1;
+	int L = 1;
+	while (L <= totVMNumber) {
+		int i = 1;
+		SelectSet4VM(L);
+
+		//cout << "开始计算p" << endl;
+
+		while (i <= Mt) {
+			Calcu_Probability(i, L);
+			i++;
+		}
+		//cout << "结束计算p" << endl;
+		//all servers are overloaded after joining VMj
+		bool allOverloaded = true;
+		
+		if (I[L].serverlist.size() > 0)	allOverloaded = false;
+
+		int selectSever;
+		if (!allOverloaded) {
+			//not all the server are overloaded afer joining VMj
+			//seclect server i for VMj according to the construction rule
+
+			//cout << "准备进入StateTransRule" << endl;
+			selectSever = StateTransRule(L);
+			//cout << "StateTransRule结束" << endl;
+		}
+		else {
+			//cout << "准备进入Complementary" << endl;
+			selectSever = ComplementaryRule(L);
+			//cout << "ComplementaryRule结束" << endl;
+		}
+		
+		Solution[selectSever].vmlist.push_back(L);
+		
+		Solution[selectSever].LC -= vc[L];
+		Solution[selectSever].LM -= vm[L];
+
+		UC[selectSever] += vc[L];
+		UM[selectSever] += vm[L];
+
+		L++;
+	}
+	//cout << "Construct结束" << endl;
+	
+}
+//f1(s)
+int EvaluateFitness_f1(Solu_Struct* S)
+{
+	//cout << "开始计算f1" << endl;
+	int y = 0;
+	//【修改Mt为ServerNember】
+	for (int i = 1; i <= totVMNumber; i++) {
+
+		//if ((LC[i] == PC[i]) && (LM[i] == PM[i]))	continue;		//未曾使用过
+		if ((S[i].LC == PC[i]) && (S[i].LM == PM[i]))	continue;
+
+		//if ((LC[i] >= 0) && (LM[i] >= 0)) y++;
+		if ((S[i].LC >= 0) && (S[i].LM >= 0))	y++;
+		else
+		{
+			y = Mt + 1;
+			//cout << "结束f1" << endl;
+			return y;
+		}
+	}
+	//cout << "结束f1" << endl;
+	return y;
+}
+//f2(s)
+double EvaluateFitness_f2(Solu_Struct *S) {
+	//cout << "开始计算f2" << endl;
+	double ans = 0.0;
+	bool isUse = false;
+
+	for (int i = 1; i <= Mt; i++) {
+		if ((S[i].LC != PC[i]) && (S[i].LM != PM[i])) {
+			//被使用过
+			ans += (1.0*abs(PC[i] - UC[i]) / PC[i]) + (1.0*abs(PM[i] - UM[i]) / PM[i]);
+		}
+	}
+	//cout << "结束计算f2" << endl;
+	return ans;
+}
+
+//update best solution
+void UpdateBestSolution() {
+	//cout << "进入UpdateBestSolution" << endl;
+
+	for (int j = 1; j <= totVMNumber; j++) {
+		VMRankSb[j] = VMRank[j];
+	}
+	
+	for (int i = 1; i <= totVMNumber; i++)
+	{
+		Solution_best[i].vmlist.clear();
+		Solution_best[i].vmlist.assign(Solution[i].vmlist.begin(), Solution[i].vmlist.end());
+		Solution_best[i].LC = Solution[i].LC;
+		Solution_best[i].LM = Solution[i].LM;
+	}
+	
+	//cout << "结束UpdateBestSolution" << endl;
+}
+//update global solution
+void UpdateGlobalSolution() {
+	
+	for (int j = 1; j <= totVMNumber; j++) {
+		VMRankSg[j] = VMRankSb[j];
+	}
+
+	
+	for (int i = 1; i <= totVMNumber; i++)
+	{
+		Solution_Global[i].vmlist.clear();
+		Solution_Global[i].vmlist.assign(Solution_best[i].vmlist.begin(), Solution_best[i].vmlist.end());
+		Solution_Global[i].LC = Solution_best[i].LC;
+		Solution_Global[i].LM = Solution_Global[i].LM;
+	}
+
+	Mmin = EvaluateFitness_f1(Solution_best);
+
+}
+//local pheromone updating after the construction of each ant
+void LocalUpdate() {
+	//cout << "开始LocalUpdate" << endl;
+	for (int i = 1; i <= Mt; i++)
+	{
+		for (int j = 0; j < Solution[i].vmlist.size(); j++)
+		{
+			for (int k = 0; k < Solution[i].vmlist.size(); k++)
+			{
+				t[Solution[i].vmlist[j]][Solution[i].vmlist[k]] = (1 - prho) * t[Solution[i].vmlist[j]][Solution[i].vmlist[k]] + prho * t0;
+			}
+		}
+	}
+	//cout << "结束LocalUpdate" << endl;
+
+}
+
+//the best solution is feasible
+bool isFeasible() {
+
+	for (int i = 1; i <= totVMNumber; i++) {
+		if ((Solution_best[i].LC < 0) || (Solution_best[i].LM < 0)) return false;
+
+	}
+	return true;
+}
+//升序,用于non-overloaded
+bool Ascending(int a, int b) {
+	int d1 = abs(vc[a] - vm[a]);
+	int d2 = abs(vc[b] - vm[b]);
+	return d1 < d2;
+}
+//降序,用于overloaded
+bool Descending(int a, int b) {
+	int d1 = abs(vc[a] - vm[a]);
+	int d2 = abs(vc[b] - vm[b]);
+	return d1 > d2;
+}
+
+bool Search4Swap(Solu_Struct* S, int overloade, int VMonOver[], int VMovercnt, int nonoverloade, int VMonNon[], int VMnoncnt) {
+
+	int CPUUse1 = CPUUseOfServeri(S, overloade);
+	int MemUse1 = MemUseOfServeri(S, overloade);
+
+	int CPUUse2 = CPUUseOfServeri(S, nonoverloade);
+	int MemUse2 = MemUseOfServeri(S, nonoverloade);
+
+
+	for (int i = 0; i < VMovercnt; i++) {
+
+		for (int j = 0; j < VMnoncnt; j++) {
+			int CPUSwap2over = CPUUse1 - vc[VMonOver[i]] + vc[VMonNon[j]];
+			int MemSwap2over = MemUse1 - vm[VMonOver[i]] + vm[VMonNon[j]];
+
+			int CPUSwap2non = CPUUse2 - vc[VMonNon[j]] + vc[VMonOver[i]];
+			int MemSwap2non = MemUse2 - vm[VMonNon[j]] + vm[VMonOver[i]];
+
+
+			//两者都没有超过容量
+			if (((CPUSwap2over <= PC[overloade]) && (MemSwap2over <= PM[overloade])) && ((CPUSwap2non <= PC[nonoverloade]) && (MemSwap2non <= PM[nonoverloade]))) {
+
+				vector<int>::iterator iter1 = find(S[overloade].vmlist.begin(), S[overloade].vmlist.end(), VMonOver[i]);
+				if (iter1 != S[overloade].vmlist.end())	*iter1 = VMonNon[j];
+
+				vector<int>::iterator iter2 = find(S[nonoverloade].vmlist.begin(), S[nonoverloade].vmlist.end(), VMonOver[j]);
+				if (iter2 != S[nonoverloade].vmlist.end())	*iter2 = VMonNon[i];
+
+				return true;
+			}
+
+
+		}
+
+	}
+
+
+	return false;
+}
+
+void OrderingExchange() {
+	int overloaded[N + 5];			//记录overloaded的server
+	int overcnt = 0;						//记录数目
+	int nonoverloader[N + 5];		//记录non-overloade的server
+	int nonovercnt = 0;						//记录数目
+
+											//UseOfSolutionBest();					//更新目前的使用情况
+
+											//记录超载和未超载的server
+	for (int i = 1; i <= totVMNumber; i++) {
+		//if (Sb_UC[i] > PC[i] || Sb_UM[i] > PM[i])	overloaded[++overcnt] = i;
+		if (Solution_best[i].LC < 0 || Solution_best[i].LM < 0)	overloaded[++overcnt] = i;
+		else nonoverloader[++nonovercnt] = i;
+	}
+
+	//分别记录在server上面的VM
+	int VMonOver[N + 5];
+	int VMonOvercnt = 0;
+	int VMonNonover[N + 5];
+	int VMonNoncnt = 0;
+
+	for (int i = 1; i <= overcnt; i++) {
+		//对于每一个超载的server
+
+		VMonOvercnt = Solution_best[i].vmlist.size();
+		
+		for (int j = 0; j < Solution_best[i].vmlist.size(); j++)
+		{
+			VMonOver[j] = Solution_best[i].vmlist[j];
+		}
+		//排序
+		sort(VMonOver, VMonOver + VMonOvercnt, Descending);
+
+		//针对每一个nonoverloaded
+		//寻找合适的不超载的server交换VM
+		for (int k = 1; k <= nonovercnt; k++) {
+
+			VMonNoncnt = Solution_best[nonoverloader[k]].vmlist.size();
+			
+			for (int j = 0; j < Solution_best[nonoverloader[k]].vmlist.size(); j++)
+			{
+				VMonNonover[j] = Solution_best[nonoverloader[k]].vmlist[j];
+			}
+
+			//排序
+			sort(VMonNonover, VMonNonover + VMonNoncnt, Ascending);
+
+			//寻找交换
+			//有寻找到合适的便跳出
+			if (Search4Swap(Solution_best, overloaded[i], VMonOver, VMonOvercnt, nonoverloader[k], VMonNonover, VMonNoncnt)) break;
+		}
+
+	}
+
+
+}
+
+void Migration() {
+	int overloaded[N + 5];			//记录overloaded的server
+	int overcnt = 0;							//记录数目
+	int nonoverloader[N + 5];		//记录non-overloade的server
+	int nonovercnt = 0;							//记录数目
+
+												//UseOfSolutionBest();						//更新目前的使用情况
+
+												//记录超载和未超载的server
+	for (int i = 1; i <= totVMNumber; i++) {
+		
+		if ((Solution_best[i].LC < 0) && (Solution_best[i].LM < 0))	overloaded[++overcnt] = i;
+		else nonoverloader[++nonovercnt] = i;
+	}
+
+	int VMonOver[N + 5];
+	int VMonOvercnt = 0;
+
+	for (int i = 1; i <= overcnt; i++) {
+		//对于每一个超载的server
+		bool succ = false;				//是否转换成功
+		VMonOvercnt = Solution_best[overloaded[i]].vmlist.size();
+
+		
+		for (int j = 0; j < Solution_best[overloaded[i]].vmlist.size(); j++)
+		{
+			VMonOver[j] = Solution_best[overloaded[i]].vmlist[j];
+		}
+
+		//对于该overloaded server上面的VM,进行逐一寻找
+		for (int j = 0; j < VMonOvercnt; j++) {
+
+			for (int k = 1; k <= nonovercnt; k++) {
+			
+				int CPUleft = Solution_best[nonoverloader[k]].LC;
+				int Memleft = Solution_best[nonoverloader[k]].LM;
+
+				//有足够容量容纳
+				if ((CPUleft >= vc[VMonOver[j]]) && (Memleft >= vm[VMonOver[j]])) {
+					
+					vector<int>::iterator iter = find(Solution_best[overloaded[i]].vmlist.begin(),
+						Solution_best[overloaded[i]].vmlist.end(), VMonOver[j]);
+
+					if (iter != Solution_best[overloaded[i]].vmlist.end())
+						Solution_best[overloaded[i]].vmlist.erase(iter);
+
+					Solution_best[nonoverloader[k]].vmlist.push_back(VMonOver[j]);
+
+					Solution_best[overloaded[i]].LC -= vc[VMonOver[j]];
+					Solution_best[overloaded[i]].LM -= vm[VMonOver[j]];
+
+					Solution_best[nonoverloader[k]].LC += vc[VMonOver[j]];
+					Solution_best[nonoverloader[k]].LM += vm[VMonOver[j]];
+
+					//使得原本overload变为non-overload
+					if ((Solution_best[overloaded[i]].LC >= 0) && (Solution_best[overloaded[i]].LM >= 0))
+					{
+						succ = true;
+						break;
+					}
+
+				}
+
+			}
+			if (succ)	break;		//转换成功,不再需要比较转换
+		}
+
+	}
+
+
+}
+
+//perform the OEM local search on Sbest
+void OEM_LocalSearch() {
+
+	OrderingExchange();
+	Migration();
+	
+}
+
+//perform global pheromone updating on Sbest
+void GlobalUpdate() {
+
+	double temp1 = 1.0 / EvaluateFitness_f1(Solution_best);
+
+	for (int i = 1; i <= totVMNumber; i++) {
+		//对于每一个server
+		//记录下该服务器上的VM
+		double temp2 = temp1 + 1.0 / ((Solution_best[i].LC) + (Solution_best[i].LM) + 1);
+
+		
+		for (int j = 0; j<Solution_best[i].vmlist.size(); j++)
+		{
+			for (int k = 0; k < Solution_best[i].vmlist.size(); k++)
+			{
+				t[Solution_best[i].vmlist[j]][Solution_best[i].vmlist[k]] = (1 - Epsilon) * t[Solution_best[i].vmlist[j]][Solution_best[i].vmlist[k]]
+					+ Epsilon * temp2;
+			}
+		}
+
+	}
+
+}
+
+void place()
+{
+	init();				//初始化
+	
+	while (iter <= MaxIter) {
+		k = 1;
+		Mt = Mmin - 1;
+		if (Mt == 0)
+		{
+			Mmin = EvaluateFitness_f1(Solution_Global);
+			break;
+		}
+		//clean the best solution of each iteration
+		for (int i = 1; i <= totVMNumber; i++)
+		{
+			Solution_best[i].vmlist.clear();
+			Solution_best[i].vmlist.assign(Solution_Global[i].vmlist.begin(), Solution_Global[i].vmlist.end());
+		}
+
+		ansOfFit_2 = DBL_MAX;
+
+		while (k <= m) {
+			//clean the solution (and the other things)of ant k 
+			for (int i = 1; i <= totVMNumber; i++) {
+				//剩余部分清空
+				Solution[i].LC = PC[i];
+				Solution[i].LM = PM[i];
+				UC[i] = 0;
+				UM[i] = 0;
+				over[i] = 0.0;
+
+				Solution[i].vmlist.clear();
+				I[i].serverlist.clear();
+
+				for (int j = 1; j <= totVMNumber; j++)
+				{
+					n[i][j] = p[i][j] = r[i][j] = 0;
+
+				}
+			}
+
+			Construct();
+
+			int y = EvaluateFitness_f1(Solution);
+			if (y < Mt) {
+				UpdateBestSolution();
+				ansOfFit_2 = EvaluateFitness_f2(Solution);			//最新的bestSolution的f2的值
+			}
+			else if (y == Mt) {
+				//当f1相同时,采用f2去判别
+				double tempf2 = EvaluateFitness_f2(Solution);
+				if (tempf2 < ansOfFit_2) {
+					UpdateBestSolution();
+					ansOfFit_2 = tempf2;
+				}
+			}
+			LocalUpdate();
+			k++;
+		}
+
+		if (isFeasible()) {
+			UpdateGlobalSolution();
+
+		}
+		else
+		{
+			OEM_LocalSearch();
+		}
+
+		GlobalUpdate();
+		ShowSolution();
+		iter++;
+	}
+
+
+	ShowSolution();			//显示结果
+
+}
+
+//----------主函数部分---------------
+
+int main()
+{
+	
+	readRequest();
+	//showRequest();
+	readTrainData();
+	//showTrainData();
+	
+	double data[5000][8];
+	int howlong = enddate - startdate;
+
+	double Answer[8], SquarePoor[8];
+	//request_flavor[++sizenumber].number = 6;
+	
+	for (int k = 1; k <= sizenumber; k++)
+	{
+		request_flavor[k].prenumber = 0;
+		//处理训练集
+		for (int i = 0; i <= count_date; i++)
+		{
+			for (int j = 0; j <= 7; j++)
+			{
+				data[i][j] = (double)everyday[i + j][request_flavor[k].number];
+			}
+		}
+
+		//通过训练数据得到回归预测
+		
+		//if (MultipleRegression((double*)data, count_date - 8, 8, Answer, SquarePoor) == 0)
+			//Display((double*)data, Answer, SquarePoor, count_date - 8, 8);
+		MultipleRegression((double*)data, count_date - 8, 8, Answer, SquarePoor);
+
+		//对要求的时间段进行预测
+		//一边预测，一边将预测结果加入到训练集中重新预测
+		for (int day = 1; day <= howlong; day++)
+		{
+			//开始预测
+			//存入
+			double temp = 0.0;
+			temp = Answer[0] + Answer[1] * everyday[count_date + day - 7][request_flavor[k].number]
+				+ Answer[2] * everyday[count_date + day - 6][request_flavor[k].number]
+				+ Answer[3] * everyday[count_date + day - 5][request_flavor[k].number]
+				+ Answer[4] * everyday[count_date + day - 4][request_flavor[k].number]
+				+ Answer[5] * everyday[count_date + day - 3][request_flavor[k].number]
+				+ Answer[6] * everyday[count_date + day - 2][request_flavor[k].number]
+				+ Answer[7] * everyday[count_date + day - 1][request_flavor[k].number];
+
+			//四舍五入
+			int ans = (int)(temp + 0.5);
+			//cout << "预测结果" << ans << endl;
+			request_flavor[k].prenumber += ans;
+			
+			data[count_date + day][request_flavor[k].number] = ans;
+			everyday[count_date + day][request_flavor[k].number] = ans;
+
+			//if (MultipleRegression((double*)data, count_date+day - 8, 8, Answer, SquarePoor) == 0)
+				//Display((double*)data, Answer, SquarePoor, count_date+day - 8, 8);
+			MultipleRegression((double*)data, count_date + day - 8, 8, Answer, SquarePoor);
+			
+		}
+		if (request_flavor[k].prenumber < 0)	request_flavor[k].prenumber = 0;
+		cout << "预测结果: " << request_flavor[k].prenumber << endl;
+		
+	}
+
+
+	initvcvm();
+	cout << totVMNumber << endl;
+	
+	place();
+	ShowSolution();			//显示结果
+	showfinal();
+
+	return 0;
+}
